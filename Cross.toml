@@ -1,0 +1,5 @@
+[target.mipsel-unknown-linux-musl]
+image = "ghcr.io/cross-rs/mipsel-unknown-linux-musl:latest"
+
+[target.mips-unknown-linux-musl]
+image = "ghcr.io/cross-rs/mips-unknown-linux-musl:latest"

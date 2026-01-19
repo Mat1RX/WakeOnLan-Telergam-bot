@@ -1,0 +1,82 @@
+name: Cross-platform Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build for ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - armv7-unknown-linux-musleabihf
+          - aarch64-unknown-linux-musl
+          - mipsel-unknown-linux-musl
+          - mips-unknown-linux-musl
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          # ВАЖНО: мы НЕ указываем targets здесь для MIPS, 
+          # чтобы избежать ошибки "component unavailable"
+          components: rust-src
+
+      - name: Install Cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build Binary
+        run: |
+          # Для MIPS архитектур используем -Z build-std, так как готовых бинарников std нет
+          if [[ "${{ matrix.target }}" == *"mips"* ]]; then
+            cross build --release --target ${{ matrix.target }} -Z build-std=std,panic_abort
+          else
+            # Для стандартных архитектур сначала добавим таргет
+            rustup target add ${{ matrix.target }}
+            cross build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Compress and Hash
+        run: |
+          sudo apt-get update && sudo apt-get install -y upx-ucl
+          BINARY="target/${{ matrix.target }}/release/WakeOnLan-Telegram-bot"
+          NEW_NAME="wol-bot-${{ matrix.target }}"
+          
+          if [ -f "$BINARY" ]; then
+            upx -9 "$BINARY"
+            mv "$BINARY" "target/${{ matrix.target }}/release/$NEW_NAME"
+            cd target/${{ matrix.target }}/release/
+            sha256sum "$NEW_NAME" > "$NEW_NAME.sha256"
+          fi
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: assets-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/wol-bot-*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ./all_assets
+          pattern: assets-*
+          merge-multiple: true
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./all_assets/wol-bot-*
+          generate_release_notes: true
