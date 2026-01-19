@@ -1,0 +1,19 @@
+[package]
+name = "WakeOnLan-Telegram-bot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+teloxide = { version = "0.12", default-features = false, features = ["macros", "ctrlc_handler", "rustls"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "net", "time", "process"] }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+toml = "0.8"
+wake-on-lan = "0.2.0"
+mac_address = "1.1"
+
+[profile.release]
+opt-level = "z"      # Оптимизация размера
+lto = true           # Глубокая очистка неиспользуемого кода
+codegen-units = 1    # Максимальное сжатие
+panic = "abort"      # Удаление кода обработки паник
+strip = true         # Удаление отладочной информации
