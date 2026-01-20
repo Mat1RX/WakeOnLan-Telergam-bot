@@ -195,7 +195,7 @@ async fn main() {
 
                 "/wake" => {
                     if let Some(name) = parts.get(1) {
-                        if let Some((mac, ip)) = config.devices.get(*name) {
+                        if let Some((mac, ip, timeout_str)) = config.devices.get(*name) {
                             let timeout_secs: u64 = timeout_str.parse().unwrap_or(30);
                             log_info!("WAKE REQUEST: User {} is waking {} ({}), timeout: {}", username, name, mac, timeout_secs);
                             
