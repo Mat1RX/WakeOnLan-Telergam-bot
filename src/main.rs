@@ -94,7 +94,7 @@ async fn main() {
             
             if !config.allowed_users.contains(&user_id) {
                 println!("[AUTH] Access denied for user ID: {}", user_id);
-                return Ok(());
+                return ResponseResult::Ok(()); // FIX: Explicitly use ResponseResult::Ok
             }
 
             let text = msg.text().unwrap_or_default();
@@ -103,37 +103,38 @@ async fn main() {
 
             match cmd {
                 "/start" | "/help" => {
-                    let help = "🤖 *WOL Bot Menu*\n\n\
-                                `/list` — List configured devices\n\
-                                `/status_all` — Ping all devices\n\
-                                `/status <name>` — Ping specific device\n\
-                                `/wake <name>` — Send Magic Packet";
-                    bot.send_message(msg.chat.id, help).parse_mode(ParseMode::Markdown).await?;
+                    let help = "<b>🤖 WOL Bot Menu</b>\n\n\
+                                <code>/list</code> — List configured devices\n\
+                                <code>/status_all</code> — Ping all devices\n\
+                                <code>/status &lt;name&gt;</code> — Ping specific device\n\
+                                <code>/wake &lt;name&gt;</code> — Send Magic Packet";
+                    bot.send_message(msg.chat.id, help).parse_mode(ParseMode::Html).await?;
                 }
 
                 "/list" => {
-                    let mut list = String::from("📋 *Configured Devices:*\n");
+                    let mut list = String::from("<b>📋 Configured Devices:</b>\n");
                     for name in config.devices.keys() {
-                        list.push_str(&format!("• `{}`\n", name));
+                        list.push_str(&format!("• <code>{}</code>\n", name));
                     }
-                    bot.send_message(msg.chat.id, list).parse_mode(ParseMode::Markdown).await?;
+                    bot.send_message(msg.chat.id, list).parse_mode(ParseMode::Html).await?;
                 }
 
                 "/status_all" => {
                     println!("[CMD] Bulk status check requested by {}", user_id);
-                    let mut report = String::from("🔍 *Network Status:*\n");
+                    let mut report = String::from("<b>🔍 Network Status:</b>\n");
                     for (name, (_, ip)) in &config.devices {
                         let status = if is_device_online(ip).await { "✅ ONLINE" } else { "🔴 OFFLINE" };
-                        report.push_str(&format!("• `{}`: {}\n", name, status));
+                        report.push_str(&format!("• <code>{}</code>: {}\n", name, status));
                     }
-                    bot.send_message(msg.chat.id, report).parse_mode(ParseMode::Markdown).await?;
+                    bot.send_message(msg.chat.id, report).parse_mode(ParseMode::Html).await?;
                 }
 
                 "/status" => {
                     if let Some(name) = parts.get(1) {
                         if let Some((_, ip)) = config.devices.get(*name) {
                             let status = if is_device_online(ip).await { "✅ ONLINE" } else { "🔴 OFFLINE" };
-                            bot.send_message(msg.chat.id, format!("Device `{}` is {}", name, status)).parse_mode(ParseMode::Markdown).await?;
+                            bot.send_message(msg.chat.id, format!("Device <code>{}</code> is {}", name, status))
+                                .parse_mode(ParseMode::Html).await?;
                         }
                     }
                 }
@@ -149,17 +150,20 @@ async fn main() {
                             if let Err(e) = socket.send_to(&packet, "255.255.255.255:9") {
                                 eprintln!("[ERROR] Failed to send packet: {}", e);
                                 bot.send_message(msg.chat.id, "❌ Error: Failed to send Magic Packet").await?;
-                                return Ok(());
+                                return ResponseResult::Ok(());
                             }
                             
-                            bot.send_message(msg.chat.id, format!("🚀 Magic Packet sent to `{}`. Verifying in 30s...", name)).parse_mode(ParseMode::Markdown).await?;
+                            bot.send_message(msg.chat.id, format!("🚀 Magic Packet sent to <code>{}</code>. Verifying in 30s...", name))
+                                .parse_mode(ParseMode::Html).await?;
 
                             tokio::time::sleep(Duration::from_secs(30)).await;
                             
                             if is_device_online(ip).await {
-                                bot.send_message(msg.chat.id, format!("✅ `{}` is now ONLINE!", name)).parse_mode(ParseMode::Markdown).await?;
+                                bot.send_message(msg.chat.id, format!("✅ <code>{}</code> is now ONLINE!", name))
+                                    .parse_mode(ParseMode::Html).await?;
                             } else {
-                                bot.send_message(msg.chat.id, format!("⚠️ `{}` is still not responding to ping.", name)).parse_mode(ParseMode::Markdown).await?;
+                                bot.send_message(msg.chat.id, format!("⚠️ <code>{}</code> is still not responding to ping.", name))
+                                    .parse_mode(ParseMode::Html).await?;
                             }
                         } else {
                             bot.send_message(msg.chat.id, "❌ Device not found in config.").await?;
@@ -168,7 +172,7 @@ async fn main() {
                 }
                 _ => {}
             }
-            Ok(())
+            ResponseResult::Ok(())
         },
     );
 
