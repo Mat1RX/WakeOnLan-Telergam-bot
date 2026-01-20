@@ -1,6 +1,6 @@
 [package]
-name = "router_wol_bot"
-version = "1.1.0"
+name = "WakeOnLan-Telergam-bot"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
