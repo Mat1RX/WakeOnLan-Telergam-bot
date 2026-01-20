@@ -11,10 +11,11 @@ allowed_users = [
 # On OpenWrt, 'br-lan' is the standard bridge for the local network.
 interface = "br-lan"
 
-# Devices mapping: "unique_name" = ["MAC_ADDRESS", "IP_ADDRESS"]
+# Devices mapping: "unique_name" = ["MAC_ADDRESS", "IP_ADDRESS", "TIMEOUT_SECS"]
 # - MAC is used for waking up the device (WOL).
 # - IP is used for checking the status (Ping).
+# - TIMEOUT_SECS is used for ping timeout after wake
 [devices]
-gaming_pc = ["AA:BB:CC:DD:EE:FF", "192.168.1.10"]
-home_server = ["11:22:33:44:55:66", "192.168.1.20"]
-nas = ["00:11:22:33:44:55", "192.168.1.30"]
+gaming_pc = ["AA:BB:CC:DD:EE:FF", "192.168.1.10", "30"]
+home_server = ["11:22:33:44:55:66", "192.168.1.20", "60"]
+nas = ["00:11:22:33:44:55", "192.168.1.30", "90"]
