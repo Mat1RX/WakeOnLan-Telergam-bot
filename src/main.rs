@@ -1,146 +1,176 @@
-use std::{collections::HashMap, fs, sync::Arc, env, time::Duration};
-use teloxide::{prelude::*, types::Message};
-use teloxide::utils::command::BotCommands;
 use serde::Deserialize;
-use wake_on_lan::MagicPacket;
-use mac_address::MacAddress;
-use tokio::process::Command as AsyncCommand;
+use socket2::{Domain, Protocol, Socket, Type};
+use std::collections::HashMap;
+use std::env;
+use std::fs;
+use std::net::UdpSocket;
+use std::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
+use teloxide::prelude::*;
+use teloxide::types::ParseMode;
 
-// --- СТРУКТУРЫ ---
-#[derive(Deserialize)]
-struct FileConfig {
+#[derive(Deserialize, Debug, Clone)]
+struct Config {
     allowed_users: Vec<u64>,
-    devices: HashMap<String, Vec<String>>,
+    interface: Option<String>,
+    devices: HashMap<String, (String, String)>,
 }
 
-struct DeviceInfo {
-    mac: [u8; 6],
-    ip: String,
+fn create_magic_packet(mac: &str) -> Result<Vec<u8>, String> {
+    let mac_bytes: Vec<u8> = mac
+        .split(|c| c == ':' || c == '-')
+        .filter(|s| !s.is_empty())
+        .map(|b| u8::from_str_radix(b, 16))
+        .collect::<Result<Vec<u8>, _>>()
+        .map_err(|_| "Invalid MAC address format".to_string())?;
+
+    if mac_bytes.len() != 6 {
+        return Err("MAC address must be exactly 6 bytes".to_string());
+    }
+
+    let mut packet = vec![0xFF; 6];
+    for _ in 0..16 {
+        packet.extend_from_slice(&mac_bytes);
+    }
+    Ok(packet)
 }
 
-struct SafeConfig {
-    allowed_users: Vec<UserId>,
-    devices: HashMap<String, DeviceInfo>,
+fn create_wol_socket(interface: Option<&str>) -> std::io::Result<UdpSocket> {
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_broadcast(true)?;
+
+    if let Some(iface) = interface {
+        #[cfg(target_os = "linux")]
+        {
+            if let Err(e) = socket.bind_device(Some(iface.as_bytes())) {
+                eprintln!("[ERROR] Failed to bind to interface {}: {}", iface, e);
+            } else {
+                println!("[INFO] Socket bound to interface: {}", iface);
+            }
+        }
+    }
+    Ok(socket.into())
 }
 
-#[derive(BotCommands, Clone)]
-#[command(rename_rule = "lowercase")]
-enum Command {
-    #[command(description = "show help")] Help,
-    #[command(description = "list devices")] List,
-    #[command(description = "wake device")] Wake(String),
-    #[command(description = "check status")] Status(String),
-}
-
-// --- ФУНКЦИИ ---
-async fn check_online(ip: &str, name: &str) -> bool {
-    println!("[PING] Checking status for {} ({})", name, ip);
-    let ok = AsyncCommand::new("ping")
+async fn is_device_online(ip: &str) -> bool {
+    let status = Command::new("ping")
         .args(["-c", "1", "-W", "1", ip])
-        .output()
-        .await
-        .map(|res| res.status.success())
-        .unwrap_or(false);
-    
-    println!("[PING] Result for {}: {}", name, if ok { "ONLINE" } else { "OFFLINE" });
-    ok
+        .status();
+    match status {
+        Ok(s) => s.success(),
+        Err(_) => false,
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    println!("--- Starting WOL Bot ---");
+    let args: Vec<String> = env::args().collect();
+    let config_path = args.get(1).map(|s| s.as_str()).unwrap_or("config.toml");
 
-    let bot_token = env::var("TELOXIDE_TOKEN")
-        .map(|t| t.trim().to_string())
-        .expect("TELOXIDE_TOKEN not set");
-    
-    let config_raw = fs::read_to_string("config.toml").expect("Missing config.toml");
-    let file_config: FileConfig = toml::from_str(&config_raw).expect("Invalid config.toml");
+    println!("[START] Launching WOL Bot. Config: {}", config_path);
 
-    let mut devices = HashMap::new();
-    for (name, params) in file_config.devices {
-        if params.len() == 2 {
-            if let Ok(mac) = params[0].parse::<MacAddress>() {
-                devices.insert(name.clone(), DeviceInfo { mac: mac.bytes(), ip: params[1].clone() });
-                println!("[INIT] Device loaded: {} ({})", name, params[1]);
-            }
+    let content = match fs::read_to_string(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[FATAL] Could not read config file {}: {}", config_path, e);
+            return;
         }
-    }
+    };
 
-    let config = Arc::new(SafeConfig {
-        allowed_users: file_config.allowed_users.into_iter().map(UserId).collect(),
-        devices,
+    let config: Arc<Config> = Arc::new(match toml::from_str(&content) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[FATAL] TOML parse error: {}", e);
+            return;
+        }
     });
 
-    println!("[INIT] Allowed users: {}", config.allowed_users.len());
-    println!("[INIT] Bot is ready and listening...");
+    let bot = Bot::from_env();
 
-    let bot = Bot::new(bot_token);
-
-    Command::repl(bot, move |bot: Bot, msg: Message, cmd: Command| {
-        let conf = config.clone();
-        async move {
-            let user = msg.from();
-            let user_id = user.map(|u| u.id).unwrap_or(UserId(0));
-            let username = user.and_then(|u| u.username.as_deref()).unwrap_or("unknown");
-
-            // SECURITY LOG
-            if !conf.allowed_users.contains(&user_id) {
-                eprintln!("[UNAUTHORIZED] ID: {} (@{}) tried to use the bot", user_id, username);
+    let handler = Update::filter_message().endpoint(
+        move |bot: Bot, config: Arc<Config>, msg: Message| async move {
+            let user_id = msg.from().map(|u| u.id.0).unwrap_or(0);
+            
+            if !config.allowed_users.contains(&user_id) {
+                println!("[AUTH] Access denied for user ID: {}", user_id);
                 return Ok(());
             }
 
-            match cmd {
-                Command::Help => {
-                    println!("[CMD] Help requested by {}", user_id);
-                    bot.send_message(msg.chat.id, Command::descriptions().to_string()).await?;
-                }
-                Command::List => {
-                    println!("[CMD] List requested by {}", user_id);
-                    let mut res = String::from("🖥 <b>Devices:</b>\n");
-                    for name in conf.devices.keys() {
-                        res.push_str(&format!("• <code>{}</code>\n", name));
-                    }
-                    bot.send_message(msg.chat.id, res).parse_mode(teloxide::types::ParseMode::Html).await?;
-                }
-                Command::Status(name) => {
-                    println!("[CMD] Status check for '{}' by {}", name, user_id);
-                    if let Some(info) = conf.devices.get(&name) {
-                        let is_up = check_online(&info.ip, &name).await;
-                        bot.send_message(msg.chat.id, if is_up { "✅ Online" } else { "💤 Offline" }).await?;
-                    } else {
-                        bot.send_message(msg.chat.id, "❌ Device not found").await?;
-                    }
-                }
-                Command::Wake(name) => {
-                    println!("[CMD] Wake request for '{}' by {}", name, user_id);
-                    if let Some(info) = conf.devices.get(&name) {
-                        let _ = MagicPacket::new(&info.mac).send();
-                        println!("[WOL] Magic Packet sent to {}", name);
-                        
-                        bot.send_message(msg.chat.id, format!("🚀 Waking {}...", name)).await?;
-                        
-                        let b = bot.clone();
-                        let ip = info.ip.clone();
-                        let cid = msg.chat.id;
-                        let n = name.clone();
+            let text = msg.text().unwrap_or_default();
+            let parts: Vec<&str> = text.split_whitespace().collect();
+            let cmd = parts.get(0).copied().unwrap_or("");
 
-                        tokio::spawn(async move {
-                            println!("[TASK] Waiting 30s to verify {}...", n);
-                            tokio::time::sleep(Duration::from_secs(30)).await;
-                            let is_up = check_online(&ip, &n).await;
-                            let _ = b.send_message(cid, if is_up { 
-                                format!("✅ <b>{}</b> is now UP!", n) 
-                            } else { 
-                                format!("⚠️ <b>{}</b> no response after 30s", n) 
-                            }).parse_mode(teloxide::types::ParseMode::Html).await;
-                        });
-                    } else {
-                        bot.send_message(msg.chat.id, "❌ Device not found").await?;
+            match cmd {
+                "/start" | "/help" => {
+                    let help = "🤖 *WOL Bot Menu*\n\n\
+                                `/list` — List configured devices\n\
+                                `/status_all` — Ping all devices\n\
+                                `/status <name>` — Ping specific device\n\
+                                `/wake <name>` — Send Magic Packet";
+                    bot.send_message(msg.chat.id, help).parse_mode(ParseMode::Markdown).await?;
+                }
+
+                "/list" => {
+                    let mut list = String::from("📋 *Configured Devices:*\n");
+                    for name in config.devices.keys() {
+                        list.push_str(&format!("• `{}`\n", name));
+                    }
+                    bot.send_message(msg.chat.id, list).parse_mode(ParseMode::Markdown).await?;
+                }
+
+                "/status_all" => {
+                    println!("[CMD] Bulk status check requested by {}", user_id);
+                    let mut report = String::from("🔍 *Network Status:*\n");
+                    for (name, (_, ip)) in &config.devices {
+                        let status = if is_device_online(ip).await { "✅ ONLINE" } else { "🔴 OFFLINE" };
+                        report.push_str(&format!("• `{}`: {}\n", name, status));
+                    }
+                    bot.send_message(msg.chat.id, report).parse_mode(ParseMode::Markdown).await?;
+                }
+
+                "/status" => {
+                    if let Some(name) = parts.get(1) {
+                        if let Some((_, ip)) = config.devices.get(*name) {
+                            let status = if is_device_online(ip).await { "✅ ONLINE" } else { "🔴 OFFLINE" };
+                            bot.send_message(msg.chat.id, format!("Device `{}` is {}", name, status)).parse_mode(ParseMode::Markdown).await?;
+                        }
                     }
                 }
-            };
+
+                "/wake" => {
+                    if let Some(name) = parts.get(1) {
+                        if let Some((mac, ip)) = config.devices.get(*name) {
+                            println!("[WAKE] Waking up {} ({})", name, mac);
+                            
+                            let packet = create_magic_packet(mac).unwrap();
+                            let socket = create_wol_socket(config.interface.as_deref()).unwrap();
+                            
+                            if let Err(e) = socket.send_to(&packet, "255.255.255.255:9") {
+                                eprintln!("[ERROR] Failed to send packet: {}", e);
+                                bot.send_message(msg.chat.id, "❌ Error: Failed to send Magic Packet").await?;
+                                return Ok(());
+                            }
+                            
+                            bot.send_message(msg.chat.id, format!("🚀 Magic Packet sent to `{}`. Verifying in 30s...", name)).parse_mode(ParseMode::Markdown).await?;
+
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                            
+                            if is_device_online(ip).await {
+                                bot.send_message(msg.chat.id, format!("✅ `{}` is now ONLINE!", name)).parse_mode(ParseMode::Markdown).await?;
+                            } else {
+                                bot.send_message(msg.chat.id, format!("⚠️ `{}` is still not responding to ping.", name)).parse_mode(ParseMode::Markdown).await?;
+                            }
+                        } else {
+                            bot.send_message(msg.chat.id, "❌ Device not found in config.").await?;
+                        }
+                    }
+                }
+                _ => {}
+            }
             Ok(())
-        }
-    }).await;
+        },
+    );
+
+    Dispatcher::builder(bot, handler).build().dispatch().await;
 }
